@@ -1,0 +1,15 @@
+bin/**
+.env
+go.sum
+*.log
+.aider*
+run_*
+codemcp.toml
+Conventions.md
+ClaudeCode.md
+system_prompt.txt
+EDIT-FILE-GUIDE.md
+code-review.md
+CHANGES.md
+CHANGES-APPROACH.md
+README-UPDATES.md
