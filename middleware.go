@@ -117,8 +117,8 @@ func (s *ErrorDeepseekServer) CallTool(ctx context.Context, req *protocol.CallTo
 	var configInfo string
 	if s.config != nil {
 		// Include some minimal config info if available
-		configInfo = fmt.Sprintf("\n\nServer configuration (partial):\n- Model: %s\n- Caching: %v",
-			s.config.DeepseekModel, s.config.EnableCaching)
+		configInfo = fmt.Sprintf("\n\nServer configuration (partial):\n- Model: %s",
+			s.config.DeepseekModel)
 	}
 
 	return &protocol.CallToolResponse{

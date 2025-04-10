@@ -12,18 +12,16 @@ import (
 // Config holds the configuration for the DeepseekMCP server
 type Config struct {
 	// API configuration
-	DeepseekAPIKey          string
-	DeepseekModel           string
-	DeepseekSystemPrompt    string
-	MaxFileSize             int64
-	AllowedFileTypes        []string
-	DeepseekTemperature     float32
-	EnableCaching           bool
-	DefaultCacheTTL         time.Duration
-	HTTPTimeout             time.Duration
-	MaxRetries              int
-	InitialBackoff          time.Duration
-	MaxBackoff              time.Duration
+	DeepseekAPIKey       string
+	DeepseekModel        string
+	DeepseekSystemPrompt string
+	MaxFileSize          int64
+	AllowedFileTypes     []string
+	DeepseekTemperature  float32
+	HTTPTimeout          time.Duration
+	MaxRetries           int
+	InitialBackoff       time.Duration
+	MaxBackoff           time.Duration
 }
 
 // NewConfig creates a new configuration instance from environment variables
@@ -97,28 +95,6 @@ func NewConfig() (*Config, error) {
 		temperature = float32(tempFloat)
 	}
 
-	// Read enable caching (optional, defaults to true)
-	enableCachingStr := os.Getenv("DEEPSEEK_ENABLE_CACHING")
-	enableCaching := true
-	if enableCachingStr != "" {
-		var err error
-		enableCaching, err = strconv.ParseBool(enableCachingStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid DEEPSEEK_ENABLE_CACHING: %w", err)
-		}
-	}
-
-	// Read default cache TTL (optional, defaults to 1 hour)
-	cacheTTLStr := os.Getenv("DEEPSEEK_DEFAULT_CACHE_TTL")
-	defaultCacheTTL := 1 * time.Hour
-	if cacheTTLStr != "" {
-		var err error
-		defaultCacheTTL, err = time.ParseDuration(cacheTTLStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid DEEPSEEK_DEFAULT_CACHE_TTL: %w", err)
-		}
-	}
-
 	// Read HTTP timeout (optional, defaults to 90 seconds)
 	timeoutStr := os.Getenv("DEEPSEEK_TIMEOUT")
 	timeout := 90 * time.Second
@@ -170,8 +146,6 @@ func NewConfig() (*Config, error) {
 		MaxFileSize:          maxFileSize,
 		AllowedFileTypes:     allowedFileTypes,
 		DeepseekTemperature:  temperature,
-		EnableCaching:        enableCaching,
-		DefaultCacheTTL:      defaultCacheTTL,
 		HTTPTimeout:          timeout,
 		MaxRetries:           maxRetries,
 		InitialBackoff:       initialBackoff,

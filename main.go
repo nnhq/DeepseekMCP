@@ -18,7 +18,6 @@ func main() {
 	deepseekModelFlag := flag.String("deepseek-model", "", "DeepSeek model name (overrides env var)")
 	deepseekSystemPromptFlag := flag.String("deepseek-system-prompt", "", "System prompt (overrides env var)")
 	deepseekTemperatureFlag := flag.Float64("deepseek-temperature", -1, "Temperature setting (0.0-1.0, overrides env var)")
-	enableCachingFlag := flag.Bool("enable-caching", true, "Enable caching feature (overrides env var)")
 	flag.Parse()
 
 	// Create application context with logger
@@ -60,10 +59,6 @@ func main() {
 		config.DeepseekTemperature = float32(*deepseekTemperatureFlag)
 	}
 
-	// Override enable caching if flag is provided
-	config.EnableCaching = *enableCachingFlag
-	logger.Info("Caching feature is %s", getCachingStatusStr(config.EnableCaching))
-
 	// Store config in context for error handler to access
 	ctx = context.WithValue(ctx, configKey, config)
 
@@ -91,13 +86,7 @@ func main() {
 	}
 }
 
-// Helper function to get caching status as a string
-func getCachingStatusStr(enabled bool) string {
-	if enabled {
-		return "enabled"
-	}
-	return "disabled"
-}
+
 
 // setupDeepseekServer creates and registers a DeepSeek server
 func setupDeepseekServer(ctx context.Context, registry *handler.HandlerRegistry, config *Config) error {
@@ -124,11 +113,6 @@ func setupDeepseekServer(ctx context.Context, registry *handler.HandlerRegistry,
 	logger.Info("File handling: max size %s, allowed types: %v",
 		humanReadableSize(config.MaxFileSize),
 		config.AllowedFileTypes)
-
-	// Log cache configuration if enabled
-	if config.EnableCaching {
-		logger.Info("Cache settings: default TTL %v", config.DefaultCacheTTL)
-	}
 
 	// Log a truncated version of the system prompt for security/brevity
 	promptPreview := config.DeepseekSystemPrompt

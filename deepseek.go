@@ -9,8 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
-
+	
 	"github.com/cohesion-org/deepseek-go"
 	"github.com/gomcpgo/mcp/pkg/protocol"
 )
@@ -19,19 +18,11 @@ import (
 type DeepseekServer struct {
 	config  *Config
 	client  *deepseek.Client
-	caches  map[string]*CacheInfo // In-memory cache storage
-	cacheMu sync.RWMutex          // Mutex for thread-safe cache access
+	models  []DeepseekModelInfo   // Dynamically discovered models
+	modelsMu sync.RWMutex         // Mutex for thread-safe model access
 }
 
-// CacheInfo represents information about a cached context
-type CacheInfo struct {
-	ID          string    `json:"id"`           // Unique ID for the cache
-	SystemPrompt string    `json:"system_prompt"` // System prompt used with this cache
-	Model       string    `json:"model"`         // Model used with this cache
-	FilePaths   []string  `json:"file_paths"`    // File paths included in the cache
-	CreatedAt   time.Time `json:"created_at"`    // When the cache was created
-	ExpiresAt   time.Time `json:"expires_at"`    // When the cache expires
-}
+
 
 // NewDeepseekServer creates a new DeepseekServer with the provided configuration
 func NewDeepseekServer(ctx context.Context, config *Config) (*DeepseekServer, error) {
@@ -48,17 +39,72 @@ func NewDeepseekServer(ctx context.Context, config *Config) (*DeepseekServer, er
 	
 	// No error is returned by NewClient in the current library version
 
-	// Create a simplified DeepseekServer without dedicated file/cache stores
-	return &DeepseekServer{
+	// Create a simplified DeepseekServer without cache storage
+	server := &DeepseekServer{
 		config: config,
 		client: client,
-		caches: make(map[string]*CacheInfo), // Initialize an in-memory cache map
-	}, nil
+	}
+	
+	// Discover available models at startup
+	err := server.discoverModels(ctx)
+	if err != nil {
+		// Log warning but continue - we'll use fallback models if needed
+		logger := getLoggerFromContext(ctx)
+		logger.Warn("Failed to discover DeepSeek models, will use fallback models: %v", err)
+	}
+	
+	return server, nil
 }
 
 // Close closes the DeepSeek client connection (not needed for the DeepSeek API)
 func (s *DeepseekServer) Close() {
 	// No need to close the client in the DeepSeek API
+}
+
+// discoverModels fetches the available models from the DeepSeek API
+func (s *DeepseekServer) discoverModels(ctx context.Context) error {
+	logger := getLoggerFromContext(ctx)
+	logger.Info("Discovering available DeepSeek models from API")
+	
+	// Get models from the API
+	apiModels, err := deepseek.ListAllModels(s.client, ctx)
+	if err != nil {
+		logger.Error("Failed to get models from DeepSeek API: %v", err)
+		return err
+	}
+	
+	// Convert to our internal model format
+	var models []DeepseekModelInfo
+	for _, apiModel := range apiModels.Data {
+		modelName := s.formatModelName(apiModel.ID)
+		
+		models = append(models, DeepseekModelInfo{
+			ID:          apiModel.ID,
+			Name:        modelName,
+			Description: fmt.Sprintf("Model provided by %s", apiModel.OwnedBy),
+		})
+	}
+	
+	// Update the models list with thread safety
+	s.modelsMu.Lock()
+	defer s.modelsMu.Unlock()
+	s.models = models
+	
+	logger.Info("Discovered %d DeepSeek models", len(models))
+	return nil
+}
+
+// formatModelName converts API model IDs to human-readable names
+func (s *DeepseekServer) formatModelName(modelID string) string {
+	// Replace hyphens with spaces and capitalize words
+	parts := strings.Split(modelID, "-")
+	for i, part := range parts {
+		if len(part) > 0 {
+			parts[i] = strings.ToUpper(part[:1]) + part[1:]
+		}
+	}
+	
+	return strings.Join(parts, " ")
 }
 
 // ListTools implements the ToolHandler interface for DeepseekServer
@@ -88,14 +134,6 @@ func (s *DeepseekServer) ListTools(ctx context.Context) (*protocol.ListToolsResp
 							"type": "string"
 						},
 						"description": "Optional: Paths to files to include in the request context"
-					},
-					"use_cache": {
-						"type": "boolean",
-						"description": "Optional: Whether to try using a cache for this request (only works with compatible models)"
-					},
-					"cache_ttl": {
-						"type": "string",
-						"description": "Optional: TTL for cache if created (e.g., '10m', '1h'). Default is 10 minutes"
 					}
 				},
 				"required": ["query"]
@@ -168,7 +206,7 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req *protocol.Ca
 	modelName := s.config.DeepseekModel
 	if customModel, ok := req.Arguments["model"].(string); ok && customModel != "" {
 		// Validate the custom model
-		if err := ValidateModelID(customModel); err != nil {
+		if err := s.ValidateModelID(customModel); err != nil {
 			logger.Error("Invalid model requested: %v", err)
 			return createErrorResponse(fmt.Sprintf("Invalid model specified: %v", err)), nil
 		}
@@ -193,58 +231,7 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req *protocol.Ca
 		}
 	}
 
-	// Check if caching is requested
-	useCache := false
-	if useCacheRaw, ok := req.Arguments["use_cache"].(bool); ok {
-		useCache = useCacheRaw
-	}
-
-	// Extract cache TTL if provided
-	cacheTTL := ""
-	if ttl, ok := req.Arguments["cache_ttl"].(string); ok {
-		cacheTTL = ttl
-	}
-
-	// If caching is requested and the model supports it, use caching
-	var cacheID string
-	var cacheErr error
-	if useCache && s.config.EnableCaching {
-		// Check if model supports caching
-		model := GetModelByID(modelName)
-		if model != nil && model.SupportsCaching {
-			// Create a cache
-			cache, err := s.createCache(ctx, &CacheRequest{
-				Model:        modelName,
-				SystemPrompt: systemPrompt,
-				FilePaths:    filePaths,
-				TTL:          cacheTTL,
-			})
-			
-			if err != nil {
-				// Log the error but continue without caching
-				logger.Warn("Failed to create cache, falling back to regular request: %v", err)
-				cacheErr = err
-			} else {
-				cacheID = cache.ID
-				logger.Info("Created cache with ID: %s", cacheID)
-			}
-		} else {
-			// Model doesn't support caching, log warning and continue
-			logger.Warn("Model %s does not support caching, falling back to regular request", modelName)
-		}
-	}
-
-	// If we successfully created a cache, use it
-	if cacheID != "" {
-		return s.handleQueryWithCache(ctx, &protocol.CallToolRequest{
-			Arguments: map[string]interface{}{
-				"cache_id": cacheID,
-				"query":    query,
-			},
-		})
-	}
-
-	// If caching failed or wasn't requested, use regular API
+	// Create ChatCompletionMessage from user query and system prompt
 	chatMessages := []deepseek.ChatCompletionMessage{
 		{
 			Role:    deepseek.ChatMessageRoleSystem,
@@ -319,134 +306,33 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req *protocol.Ca
 			errorMsg += fmt.Sprintf("\n\nThe request included %d file(s).", len(filePaths))
 		}
 		
-		if cacheErr != nil {
-			// Include cache error in response if it exists
-			errorMsg += fmt.Sprintf("\n\nCache error: %v", cacheErr)
-		}
-		
 		return createErrorResponse(errorMsg), nil
 	}
 	
 	return s.formatResponse(response), nil
 }
 
-// handleQueryWithCache handles internal requests to query with a cached context
-func (s *DeepseekServer) handleQueryWithCache(ctx context.Context, req *protocol.CallToolRequest) (*protocol.CallToolResponse, error) {
-	logger := getLoggerFromContext(ctx)
-	logger.Info("Handling query with cache request")
 
-	// Check if caching is enabled
-	if !s.config.EnableCaching {
-		return createErrorResponse("caching is disabled"), nil
-	}
-
-	// Extract and validate required parameters
-	cacheID, ok := req.Arguments["cache_id"].(string)
-	if !ok || cacheID == "" {
-		return createErrorResponse("cache_id must be a non-empty string"), nil
-	}
-
-	query, ok := req.Arguments["query"].(string)
-	if !ok || query == "" {
-		return createErrorResponse("query must be a non-empty string"), nil
-	}
-
-	// Get cache info
-	cacheInfo, err := s.getCache(ctx, cacheID)
-	if err != nil {
-		logger.Error("Failed to get cache info: %v", err)
-		return createErrorResponse(fmt.Sprintf("failed to get cache: %v", err)), nil
-	}
-
-	// Get system prompt from cache
-	systemPrompt := cacheInfo.SystemPrompt
-	if systemPrompt == "" {
-		// Fallback to default
-		systemPrompt = s.config.DeepseekSystemPrompt
-	}
-	
-	// Create messages array with system prompt
-	messages := []deepseek.ChatCompletionMessage{
-		{
-			Role:    deepseek.ChatMessageRoleSystem,
-			Content: systemPrompt,
-		},
-		{
-			Role:    deepseek.ChatMessageRoleUser,
-			Content: query,
-		},
-	}
-	
-	// Add file contents if they were included in the cache
-	if len(cacheInfo.FilePaths) > 0 {
-		// Include the files in the message
-		fileContents := "\n\n# Reference Files (from cached context)\n"
-		successfulFiles := 0
-		fileSizes := []int64{}
-		
-		for _, filePath := range cacheInfo.FilePaths {
-			// Read file content using our readFile function
-			content, err := readFile(filePath)
-			if err != nil {
-				logger.Error("Failed to read cached file %s: %v", filePath, err)
-				continue
-			}
-			
-			// Record successful file read and size
-			successfulFiles++
-			fileSizes = append(fileSizes, int64(len(content)))
-			
-			// Get language extension for markdown highlighting
-			language := getLanguageFromPath(filePath)
-			
-			// Add file content to the combined contents with file name as header and proper markdown formatting
-			fileContents += fmt.Sprintf("\n\n## %s\n\n```%s\n%s\n```", 
-				filepath.Base(filePath), language, string(content))
-		}
-		
-		// Log some statistics about the cached files
-		logger.Info("Including %d cached file(s) in the query, total size: %s", 
-			successfulFiles, humanReadableSize(sumSizes(fileSizes)))
-		
-		// Add file contents to the query if any files were successfully read
-		if successfulFiles > 0 {
-			messages[1].Content = query + fileContents
-		}
-	}
-	
-	request := &deepseek.ChatCompletionRequest{
-		Model:       cacheInfo.Model,
-		Messages:    messages,
-		Temperature: s.config.DeepseekTemperature,
-	}
-
-	// Send the request
-	response, err := s.client.CreateChatCompletion(ctx, request)
-	if err != nil {
-		logger.Error("DeepSeek API error in cached query: %v", err)
-		
-		// Create a detailed error message
-		errorMsg := fmt.Sprintf("Error from DeepSeek API when using cached context: %v\n\n", err)
-		errorMsg += fmt.Sprintf("Cache ID: %s\nModel: %s", cacheID, cacheInfo.Model)
-		
-		// Include file information if available
-		if len(cacheInfo.FilePaths) > 0 {
-			errorMsg += fmt.Sprintf("\nCache includes %d file path(s)", len(cacheInfo.FilePaths))
-		}
-		
-		return createErrorResponse(errorMsg), nil
-	}
-
-	return s.formatResponse(response), nil
-}
 
 // handleDeepseekModels handles requests to the deepseek_models tool
 func (s *DeepseekServer) handleDeepseekModels(ctx context.Context) (*protocol.CallToolResponse, error) {
 	logger := getLoggerFromContext(ctx)
 	logger.Info("Listing available DeepSeek models")
 
-	// Get available models
-	models := GetAvailableDeepseekModels()
+	// Get available models (dynamically discovered or fallback)
+	models := s.GetAvailableDeepseekModels()
+	
+	// Try to refresh the models list if it's empty
+	if len(models) == 0 {
+		logger.Warn("No models available, attempting to refresh from API")
+		err := s.discoverModels(ctx)
+		if err != nil {
+			logger.Error("Failed to refresh models from API: %v", err)
+		} else {
+			// Get the refreshed models
+			models = s.GetAvailableDeepseekModels()
+		}
+	}
 
 	// Create a formatted response using strings.Builder with error handling
 	var formattedContent strings.Builder
@@ -470,18 +356,13 @@ func (s *DeepseekServer) handleDeepseekModels(ctx context.Context) (*protocol.Ca
 			return createErrorResponse("Error generating model list"), nil
 		}
 
+		// Add basic model info
 		if err := writeStringf("- ID: `%s`\n", model.ID); err != nil {
 			logger.Error("Error writing to response: %v", err)
 			return createErrorResponse("Error generating model list"), nil
 		}
 
-		if err := writeStringf("- Description: %s\n", model.Description); err != nil {
-			logger.Error("Error writing to response: %v", err)
-			return createErrorResponse("Error generating model list"), nil
-		}
-
-		// Add caching support info
-		if err := writeStringf("- Supports Caching: %v\n\n", model.SupportsCaching); err != nil {
+		if err := writeStringf("- Description: %s\n\n", model.Description); err != nil {
 			logger.Error("Error writing to response: %v", err)
 			return createErrorResponse("Error generating model list"), nil
 		}
@@ -498,23 +379,7 @@ func (s *DeepseekServer) handleDeepseekModels(ctx context.Context) (*protocol.Ca
 		return createErrorResponse("Error generating model list"), nil
 	}
 
-	if err := writeStringf("```json\n{\n  \"query\": \"Your question here\",\n  \"model\": \"deepseek-chat-001\",\n  \"use_cache\": true\n}\n```\n"); err != nil {
-		logger.Error("Error writing to response: %v", err)
-		return createErrorResponse("Error generating model list"), nil
-	}
-
-	// Add info about caching
-	if err := writeStringf("\n## Caching\n"); err != nil {
-		logger.Error("Error writing to response: %v", err)
-		return createErrorResponse("Error generating model list"), nil
-	}
-
-	if err := writeStringf("Only models with version suffixes (e.g., ending with `-001`) support caching.\n"); err != nil {
-		logger.Error("Error writing to response: %v", err)
-		return createErrorResponse("Error generating model list"), nil
-	}
-
-	if err := writeStringf("When using a cacheable model, you can enable caching with the `use_cache` parameter. This will create a temporary cache that automatically expires after 10 minutes by default. You can specify a custom TTL with the `cache_ttl` parameter.\n"); err != nil {
+	if err := writeStringf("```json\n{\n  \"query\": \"Your question here\",\n  \"model\": \"deepseek-chat\"\n}\n```\n"); err != nil {
 		logger.Error("Error writing to response: %v", err)
 		return createErrorResponse("Error generating model list"), nil
 	}
