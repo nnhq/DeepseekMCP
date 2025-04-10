@@ -55,7 +55,7 @@ type SimpleLogger struct {
 func NewLogger(level LogLevel) Logger {
 	return &SimpleLogger{
 		level:  level,
-		logger: log.New(os.Stdout, "", log.LstdFlags),
+		logger: log.New(os.Stderr, "", log.LstdFlags),
 	}
 }
 
