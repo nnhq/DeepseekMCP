@@ -134,6 +134,10 @@ func (s *DeepseekServer) ListTools(ctx context.Context) (*protocol.ListToolsResp
 							"type": "string"
 						},
 						"description": "Optional: Paths to files to include in the request context"
+					},
+					"json_mode": {
+						"type": "boolean",
+						"description": "Optional: Enable JSON mode to receive structured JSON responses. Set to true when you expect JSON output."
 					}
 				},
 				"required": ["query"]
@@ -145,6 +149,33 @@ func (s *DeepseekServer) ListTools(ctx context.Context) (*protocol.ListToolsResp
 			InputSchema: json.RawMessage(`{
 				"type": "object",
 				"properties": {},
+				"required": []
+			}`),
+		},
+		{
+			Name:        "deepseek_balance",
+			Description: "Check your DeepSeek API account balance",
+			InputSchema: json.RawMessage(`{
+				"type": "object",
+				"properties": {},
+				"required": []
+			}`),
+		},
+		{
+			Name:        "deepseek_token_estimate",
+			Description: "Estimate the number of tokens in text or a file",
+			InputSchema: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"text": {
+						"type": "string",
+						"description": "Text to estimate token count for"
+					},
+					"file_path": {
+						"type": "string",
+						"description": "Path to file to estimate token count for"
+					}
+				},
 				"required": []
 			}`),
 		},
@@ -187,6 +218,10 @@ func (s *DeepseekServer) CallTool(ctx context.Context, req *protocol.CallToolReq
 		return s.handleAskDeepseek(ctx, req)
 	case "deepseek_models":
 		return s.handleDeepseekModels(ctx)
+	case "deepseek_balance":
+		return s.handleDeepseekBalance(ctx)
+	case "deepseek_token_estimate":
+		return s.handleTokenEstimate(ctx, req)
 	default:
 		return createErrorResponse(fmt.Sprintf("unknown tool: %s", req.Name)), nil
 	}
@@ -231,6 +266,14 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req *protocol.Ca
 		}
 	}
 
+	// Extract optional JSON mode parameter
+	jsonMode := false
+	if jsonModeRaw, ok := req.Arguments["json_mode"].(bool); ok {
+		jsonMode = jsonModeRaw
+		logger.Info("JSON mode is enabled: %v", jsonMode)
+	}
+
+
 	// Create ChatCompletionMessage from user query and system prompt
 	chatMessages := []deepseek.ChatCompletionMessage{
 		{
@@ -248,6 +291,7 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req *protocol.Ca
 		Model:       modelName,
 		Messages:    chatMessages,
 		Temperature: s.config.DeepseekTemperature,
+		JSONMode:    jsonMode,
 	}
 
 	// Log the temperature setting
@@ -313,6 +357,156 @@ func (s *DeepseekServer) handleAskDeepseek(ctx context.Context, req *protocol.Ca
 }
 
 
+
+// handleTokenEstimate handles requests to the deepseek_token_estimate tool
+func (s *DeepseekServer) handleTokenEstimate(ctx context.Context, req *protocol.CallToolRequest) (*protocol.CallToolResponse, error) {
+	logger := getLoggerFromContext(ctx)
+	logger.Info("Estimating token count")
+
+	// Check if we have text or file_path
+	text, hasText := req.Arguments["text"].(string)
+	filePath, hasFilePath := req.Arguments["file_path"].(string)
+
+	// Initialize variables for the response
+	var estimatedTokens int
+	var sourceType string
+	var sourceName string
+	var content string
+
+	// Handle input from file path
+	if hasFilePath && filePath != "" {
+		// Read file content
+		fileContent, err := readFile(filePath)
+		if err != nil {
+			logger.Error("Failed to read file: %v", err)
+			return createErrorResponse(fmt.Sprintf("Error reading file: %v", err)), nil
+		}
+
+		// Convert to string for estimation
+		content = string(fileContent)
+		sourceType = "file"
+		sourceName = filepath.Base(filePath)
+
+		// Estimate tokens
+		estimate := deepseek.EstimateTokenCount(content)
+		estimatedTokens = estimate.EstimatedTokens
+
+		logger.Info("Estimated %d tokens for file %s", estimatedTokens, filePath)
+	} else if hasText && text != "" {
+		// Estimate tokens directly from the provided text
+		content = text
+		sourceType = "text"
+		sourceName = "provided input"
+
+		// Estimate tokens
+		estimate := deepseek.EstimateTokenCount(content)
+		estimatedTokens = estimate.EstimatedTokens
+
+		logger.Info("Estimated %d tokens for provided text", estimatedTokens)
+	} else {
+		// Neither text nor file_path provided
+		return createErrorResponse("Please provide either 'text' or 'file_path' parameter"), nil
+	}
+
+	// Create a formatted response
+	var formattedContent strings.Builder
+
+	// Write the header
+	formattedContent.WriteString("# Token Estimation Results\n\n")
+
+	// Write the summary
+	formattedContent.WriteString(fmt.Sprintf("**Source Type:** %s\n", sourceType))
+	formattedContent.WriteString(fmt.Sprintf("**Source:** %s\n", sourceName))
+	formattedContent.WriteString(fmt.Sprintf("**Estimated Token Count:** %d\n\n", estimatedTokens))
+
+	// Add size information
+	contentSize := len(content)
+	charCount := len([]rune(content))
+
+	formattedContent.WriteString("## Content Statistics\n\n")
+	formattedContent.WriteString(fmt.Sprintf("- **Byte Size:** %s (%d bytes)\n", humanReadableSize(int64(contentSize)), contentSize))
+	formattedContent.WriteString(fmt.Sprintf("- **Character Count:** %d characters\n", charCount))
+	if charCount > 0 {
+		formattedContent.WriteString(fmt.Sprintf("- **Tokens per Character Ratio:** %.2f tokens/char\n", float64(estimatedTokens)/float64(charCount)))
+	}
+
+	// Add usage note
+	formattedContent.WriteString("\n## Note\n\n")
+	formattedContent.WriteString("*This is an estimation and may not exactly match the token count used by the API. ")
+	formattedContent.WriteString("Actual token usage can vary based on the model and specific tokenization algorithm.*\n")
+
+	// Return the response
+	return &protocol.CallToolResponse{
+		Content: []protocol.ToolContent{
+			{
+				Type: "text",
+				Text: formattedContent.String(),
+			},
+		},
+	}, nil
+}
+
+// handleDeepseekBalance handles requests to the deepseek_balance tool
+func (s *DeepseekServer) handleDeepseekBalance(ctx context.Context) (*protocol.CallToolResponse, error) {
+	logger := getLoggerFromContext(ctx)
+	logger.Info("Checking DeepSeek API balance")
+
+	// Get balance information from the API
+	balanceResponse, err := deepseek.GetBalance(s.client, ctx)
+	if err != nil {
+		logger.Error("Failed to get balance from DeepSeek API: %v", err)
+		return createErrorResponse(fmt.Sprintf("Error checking balance: %v", err)), nil
+	}
+
+	// Create a formatted response
+	var formattedContent strings.Builder
+
+	// Write the header
+	formattedContent.WriteString("# DeepSeek API Balance Information\n\n")
+
+	// Add availability status
+	formattedContent.WriteString(fmt.Sprintf("**Account Status:** %s\n\n", 
+		getAvailabilityStatus(balanceResponse.IsAvailable)))
+
+	// If there are balance details, add them
+	if len(balanceResponse.BalanceInfos) > 0 {
+		formattedContent.WriteString("## Balance Details\n\n")
+		formattedContent.WriteString("| Currency | Total Balance | Granted Balance | Topped-up Balance |\n")
+		formattedContent.WriteString("|----------|--------------|----------------|------------------|\n")
+
+		for _, balance := range balanceResponse.BalanceInfos {
+			formattedContent.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
+				balance.Currency,
+				balance.TotalBalance,
+				balance.GrantedBalance,
+				balance.ToppedUpBalance))
+		}
+	} else {
+		formattedContent.WriteString("*No balance details available*\n")
+	}
+
+	// Add usage information
+	formattedContent.WriteString("\n## Usage Information\n\n")
+	formattedContent.WriteString("To top up your account or check more detailed usage statistics, ")
+	formattedContent.WriteString("please visit the [DeepSeek Platform](https://platform.deepseek.com).\n")
+
+	return &protocol.CallToolResponse{
+		Content: []protocol.ToolContent{
+			{
+				Type: "text",
+				Text: formattedContent.String(),
+			},
+		},
+	}, nil
+}
+
+// Helper function to format the availability status
+func getAvailabilityStatus(isAvailable bool) string {
+	if isAvailable {
+		return "✅ Available (Balance is sufficient for API calls)"
+	}
+	return "❌ Unavailable (Insufficient balance for API calls)"
+}
 
 // handleDeepseekModels handles requests to the deepseek_models tool
 func (s *DeepseekServer) handleDeepseekModels(ctx context.Context) (*protocol.CallToolResponse, error) {
