@@ -1,1 +1,0 @@
-/Users/rrj/Projekty/CodeAssist/Prompts/CONVENTIONS.md
