@@ -3,43 +3,34 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*' # 推送版本标签时触发 (例如 v1.0.0)
-  workflow_dispatch: # 允许手动触发工作流
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build-and-release:
-    name: Build and Release
     runs-on: windows-latest
     permissions:
-      contents: write # 需要写权限来创建 release
+      contents: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/sup-go@v5
         with:
-          go-version: '1.21.x' # 指定 Go 版本
+          go-version: '1.21.x'
 
-      - name: Build executable
-        working-directory: DeepseekMCP
+      - name: Build
         env:
-          CGO_ENABLED: 0       # 禁用 CGO 以确保静态链接
-          GOOS: windows        # 目标操作系统
-          GOARCH: amd64        # 目标架构
-        run: go build -o deepseek-mcp.exe
+          CGO_ENABLED: 0
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          cd DeepseekMCP
+          go build -o deepseek-mcp.exe
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - uses: softprops/action-gh-release@v1
         with:
-          name: "DeepseekMCP ${{ github.ref_name }}" # Release 名称
-          tag_name: ${{ github.ref_name }}           # 使用触发工作流的标签
-          body: |                                    # Release 描述
-            Automated build for Windows x64
-            - Version: ${{ github.ref_name }}
-            - Build date: ${{ github.event.head_commit.timestamp }}
-          files: |                                   # 包含的构建产物
-            DeepseekMCP/deepseek-mcp.exe
+          files: DeepseekMCP/deepseek-mcp.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
